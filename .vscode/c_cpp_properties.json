@@ -1,0 +1,21 @@
+{
+    "configurations": [
+        {
+            "name": "helmet",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "${env:RK_SDK_ROOT}/buildroot/output/rockchip_rv1126b/host/aarch64-buildroot-linux-gnu/sysroot/usr/include/**",
+                "${env:RK_SDK_ROOT}/external/rknpu2/examples/3rdparty/opencv/opencv-linux-aarch64/include/**"
+            ],
+            "browse": {
+                "path": [
+                    "${workspaceFolder}",
+                    "${env:RK_SDK_ROOT}/buildroot/output/rockchip_rv1126b/host/aarch64-buildroot-linux-gnu/sysroot/usr/include/**",
+                    "${env:RK_SDK_ROOT}/external/rknpu2/examples/3rdparty/opencv/opencv-linux-aarch64/include/**"
+                ],
+                "limitSymbolsToIncludedHeaders": true
+            }
+        }
+    ],
+    "version": 4
+}

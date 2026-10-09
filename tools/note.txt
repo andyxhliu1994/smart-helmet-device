@@ -1,0 +1,85 @@
+vi /oem/usr/bin/RkLunch.sh
+
+/oem/usr/etc/init.d/S40rkaiq_3A start
+
+/usr/bin/amixer sset "ACodec PGA Gain" 30
+/usr/bin/nohup /oem/usr/bin/rkaiq_3A_server 2>&1 >/dev/null &
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/oem/helmet/lib     
+
+sh -c "echo '这是一条来自终端的测试消息' > /dev/kmsg"
+sh -c "echo 'acodec PAG Gain set 30' > /dev/kmsg"
+
+ffmpeg -i poweroff.wav -ar 16000 -ac 1 -f s16le poweroff.pcm
+ffmpeg -i di.mp3 -af "volume=8" -ar 16000 -ac 1 -f s16le di.pcm
+ffmpeg -i ka.mp3 -af "volume=8" -ar 16000 -ac 1 -f s16le ka.pcm
+
+
+[/oem/helmet]# ls
+helmet_monitor.sh  test.json          helmet             lib
+model              snd
+
+[/oem/helmet/lib]# ls -lh
+lrwxrwxrwx    1      22 libmbedx509.so.1 -> libmbedx509.so.2.28.10
+lrwxrwxrwx    1      14 libcap.so -> libcap.so.2.69
+lrwxrwxrwx    1      24 libmbedcrypto.so.7 -> libmbedcrypto.so.2.28.10
+lrwxrwxrwx    1      19 libnanomsg.so.6 -> libnanomsg.so.6.0.1
+lrwxrwxrwx    1      11 libssl.so -> libssl.so.3
+-rw-rw-rw-    1  314.4K libcurl.so.4.5.0
+-rw-rw-rw-    1  174.7K libmbedx509.so.2.28.10
+-rw-rw-rw-    1  401.4K libnanomsg.so.6.0.1
+-rw-rw-rw-    1  982.0K libwebsockets.so.21
+lrwxrwxrwx    1      15 librga.so -> librga.so.2.1.0
+lrwxrwxrwx    1      16 libcurl.so.4 -> libcurl.so.4.5.0
+lrwxrwxrwx    1      19 libnanomsg.so -> libnanomsg.so.6.0.1
+-rw-rw-rw-    1  279.0K libmbedtls.so.2.28.10
+lrwxrwxrwx    1      16 libcurl.so -> libcurl.so.4.5.0
+lrwxrwxrwx    1      14 libcap.so.2 -> libcap.so.2.69
+-rw-rw-rw-    1  218.3K librga.so.2.1.0
+lrwxrwxrwx    1      15 librga.so.2 -> librga.so.2.1.0
+-rw-rw-rw-    1  924.8K libssl.so.3
+-rw-rw-rw-    1  717.6K libmbedcrypto.so.2.28.10
+lrwxrwxrwx    1      21 libmbedtls.so.14 -> libmbedtls.so.2.28.10
+-rw-rw-rw-    1   45.8K libcap.so.2.69
+
+[/oem/helmet/model]# ls -lh
+-rw-rw-rw-    1    2.2K config_aovqe.json
+-rw-rw-rw-    1   10.3M SourceHanSansCN.ttf
+-rw-rw-rw-    1    3.4M iva_object_detection_v3_pfp.data
+lrwxrwxrwx    1      32 iva_object_detection_pfp.data -> iva_object_detection_v3_pfp.data
+-rw-rw-rw-    1    5.0M iva_object_detection_v3_cls8.data
+-rw-rw-rw-    1     621 coco_80_labels_list.txt
+-rw-rw-rw-    1    7.4M yolov5s_relu.rknn
+-rw-rw-rw-    1    5.6K config_aivqe.json
+-rw-rw-rw-    1  184.2K SourceHanSansEN.ttf
+
+[/oem/helmet/snd]# ls -lh
+-rw-rw-rw-    1   36.7K connected.pcm
+-rw-rw-rw-    1   11.3K di.pcm
+-rw-rw-rw-    1   41.2K connecting.pcm
+-rw-rw-rw-    1   43.4K connectfailed.pcm
+-rw-rw-rw-    1   19.7K poweroff.pcm
+-rw-rw-rw-    1   25.4K poweron.pcm
+-rw-rw-rw-    1   13.2K ka.pcm
+
+！！！！！！！！！！！！！！！！！！！！！！！！
+部署时注意
+！！！！！！！！！！！！！！！！！！！！！！！！
+
+將原來的/oem/usr/lib/libcurl.so.4 改名為/oem/usr/lib/bk-libcurl.so.4
+
+[/oem/helmet/lib]# ln -s libmbedx509.so.2.28.10 libmbedx509.so.1
+[/oem/helmet/lib]# ln -s libcap.so.2.69 libcap.so
+[/oem/helmet/lib]# ln -s libcap.so.2.69 libcap.so.2
+[/oem/helmet/lib]# ln -s libmbedcrypto.so.2.28.10 libmbedcrypto.so.7
+[/oem/helmet/lib]# ln -s libnanomsg.so.6.0.1 libnanomsg.so.6
+[/oem/helmet/lib]# ln -s libnanomsg.so.6.0.1 libnanomsg.so
+[/oem/helmet/lib]# ln -s libssl.so.3 libssl.so
+[/oem/helmet/lib]# ln -s librga.so.2.1.0 librga.so
+[/oem/helmet/lib]# ln -s librga.so.2.1.0 librga.so.2
+[/oem/helmet/lib]# ln -s libcurl.so.4.5.0 libcurl.so.4
+[/oem/helmet/lib]# ln -s libcurl.so.4.5.0 libcurl.so
+[/oem/helmet/lib]# ln -s libmbedtls.so.2.28.10 libmbedtls.so.14
+
+[/oem/helmet/model]# ln -s iva_object_detection_v3_pfp.data iva_object_detection_pfp.data
+[/oem/usr/etc/init.d]# mkdir bk
+[/oem/usr/etc/init.d]# mv S85rd_camera S50fcgiwrap S99rv1126_spp_provision S50nginx  bk
