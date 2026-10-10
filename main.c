@@ -11,6 +11,16 @@
 #include "lwsc.h"
 #include "key.h"
 
+#define POWERON_PROMPT_MARKER "/tmp/helmet_poweron_prompted"
+
+static void play_poweron_prompt_once(void)
+{
+	int fd = open(POWERON_PROMPT_MARKER, O_WRONLY | O_CREAT | O_EXCL, 0600);
+	if (fd < 0)
+		return;
+	close(fd);
+	ao_play_snd(SND_POWERON);
+}
 
 int main(int argc, char *argv[]) {
 	RK_S32 s32Ret = RK_FAILURE;
@@ -36,7 +46,7 @@ int main(int argc, char *argv[]) {
 	init_vi( mainStreamWidth, mainStreamHeight, mainStreamFps ) ;
 	init_ai( aiSampleRate );
 	init_ao();
-	ao_play_snd( SND_POWERON );
+	play_poweron_prompt_once();
 	init_osd();
 	init_broder_osd();
 	init_ivs( mainStreamWidth, mainStreamHeight, u32Sensitivity);

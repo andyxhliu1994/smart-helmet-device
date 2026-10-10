@@ -527,7 +527,12 @@ int check_network(void)
 		sleep(2);
 		if (check_internet_connectivity() == 0) {
        	 	printf("网络连接正常\n");
-			ao_play_snd( SND_CONNECTED );
+			int fd = open("/tmp/helmet_network_connected_prompted",
+					  O_WRONLY | O_CREAT | O_EXCL, 0600);
+			if (fd >= 0) {
+				close(fd);
+				ao_play_snd(SND_CONNECTED);
+			}
 			i = 0;
 			break;
     	} else {

@@ -3,8 +3,13 @@
 struct lws_context *context = NULL;
 struct lws *wsi_cmd = NULL;
 struct lws *wsi_voice = NULL;
-static bool lws_exit = false;
-static bool lws_retry = false;
+static pthread_t lws_thread;
+static bool lws_thread_started = false;
+static volatile bool lws_stop = false;
+static volatile bool lws_reconnect_requested = false;
+static bool cmd_hello_pending = false;
+
+#define LWSC_RECONNECT_SECONDS 10
 
 int init_lws_create(void);
 int lwsc_reconnect(void);
@@ -15,15 +20,24 @@ static int ws_callback_cmd(struct lws *wsi, enum lws_callback_reasons reason,
     switch (reason) {
         case LWS_CALLBACK_CLIENT_ESTABLISHED:
             printf("cmd 连接建立成功!\n");// 在这里保存对应的 wsi 句柄
-            if (wsi_cmd == NULL) 
-                wsi_cmd = wsi;
+            wsi_cmd = wsi;
+            cmd_hello_pending = true;
+            lws_callback_on_writable(wsi);
+            break;
+
+        case LWS_CALLBACK_CLIENT_WRITEABLE:
+            if (cmd_hello_pending) {
+                lws_send_message(wsi, "{\"msgid\":0,\"cmd\":\"hello\"}");
+                cmd_hello_pending = false;
+            }
             break;
 
         case LWS_CALLBACK_CLIENT_RECEIVE:{
-            printf("CMD 收到消息: %.*s\n", len, (char *)in);
+            printf("CMD 收到消息: %.*s\n", (int)len, (char *)in);
             char cmd_str[1024*2] = {0};
             char cmd[32] = {0};
-            strncpy( cmd_str, (const char *)in, len );
+            size_t copy_len = len < sizeof(cmd_str) - 1 ? len : sizeof(cmd_str) - 1;
+            memcpy(cmd_str, in, copy_len);
 
             cJSON *pJsonRoot = cJSON_Parse( cmd_str );
             if(pJsonRoot !=NULL){
@@ -60,15 +74,15 @@ static int ws_callback_cmd(struct lws *wsi, enum lws_callback_reasons reason,
 
         case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
             printf("cmd 连接失败\n");
+            wsi_cmd = NULL;
+            lwsc_reconnect();
             break;
 
         case LWS_CALLBACK_CLOSED:
         case LWS_CALLBACK_CLIENT_CLOSED:
             printf("cmd 连接断开\n");
-            if( false ==  lws_retry ){
-                lws_retry = true;
-                lwsc_reconnect();
-            }
+            wsi_cmd = NULL;
+            lwsc_reconnect();
             break;
 
         default:
@@ -84,8 +98,7 @@ static int ws_callback_voice(struct lws *wsi, enum lws_callback_reasons reason,
     switch (reason) {
         case LWS_CALLBACK_CLIENT_ESTABLISHED:
             printf("voice 连接建立成功!\n");// 在这里保存对应的 wsi 句柄
-            if (wsi_voice == NULL) 
-                wsi_voice = wsi;
+            wsi_voice = wsi;
             break;
 
         case LWS_CALLBACK_CLIENT_RECEIVE:
@@ -105,15 +118,15 @@ static int ws_callback_voice(struct lws *wsi, enum lws_callback_reasons reason,
            
         case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
             printf("voice 连接失败\n");
+            wsi_voice = NULL;
+            lwsc_reconnect();
             break;
 
         case LWS_CALLBACK_CLOSED:
         case LWS_CALLBACK_CLIENT_CLOSED:
             printf("voice 连接断开\n");
-            if( false ==  lws_retry ){
-                lws_retry = true;
-                lwsc_reconnect();
-            }
+            wsi_voice = NULL;
+            lwsc_reconnect();
             break;           
 
         default:
@@ -130,22 +143,57 @@ static struct lws_protocols protocols[] = {
 
 
 void lws_send_message(struct lws *wsi, const char *message) {
-    if (!wsi) return;
+    if (!wsi || !message) return;
     // 为 lws_write 预留 LWS_PRE 字节
-    unsigned char buf[LWS_PRE + 128];
-    int msg_len = strlen(message);
+    size_t msg_len = strlen(message);
+    unsigned char *buf = (unsigned char *)malloc(LWS_PRE + msg_len);
+    if (!buf) return;
     // 拷贝消息并发送
     memcpy(&buf[LWS_PRE], message, msg_len);
     lws_write(wsi, &buf[LWS_PRE], msg_len, LWS_WRITE_TEXT);
+    free(buf);
 }
 
+static void wait_before_reconnect(void)
+{
+    int i;
+    printf("websocket 将在 %d 秒后重连\n", LWSC_RECONNECT_SECONDS);
+    for (i = 0; i < LWSC_RECONNECT_SECONDS * 10; ++i) {
+        if (quit || lws_stop)
+            return;
+        usleep(100000);
+    }
+}
 
 void *lws_task(void *arg) {
     printf("lws task start\n");
-    while ( (!quit) && (!lws_exit) ) // 运行事件循环
-        lws_service(context, 50); // 轮询50ms
+    while (!quit && !lws_stop) {
+        lws_reconnect_requested = false;
+
+        if (init_lws_create() != 0) {
+            RK_LOGE("create lws link fail!");
+            wait_before_reconnect();
+            continue;
+        }
+
+        while (!quit && !lws_stop && !lws_reconnect_requested) {
+            if (lws_service(context, 100) < 0) {
+                printf("websocket service error\n");
+                lws_reconnect_requested = true;
+            }
+        }
+
+        if (context)
+            lws_context_destroy(context);
+        context = NULL;
+        wsi_cmd = NULL;
+        wsi_voice = NULL;
+        cmd_hello_pending = false;
+
+        if (!quit && !lws_stop)
+            wait_before_reconnect();
+    }
     printf("lws task end\n");
-    lws_exit = false;
     return NULL;
 }
 
@@ -185,7 +233,12 @@ int init_lws_create(void)
     i1.origin = "origin";
     i1.protocol = protocols[0].name;
     i1.pwsi = &wsi_cmd;
-    lws_client_connect_via_info(&i1);
+    if (!lws_client_connect_via_info(&i1)) {
+        printf("cmd websocket connection start failed\n");
+        lws_context_destroy(context);
+        context = NULL;
+        return -1;
+    }
     // 2. 连接到 URL 2
     struct lws_client_connect_info i2;
     memset(&i2, 0, sizeof(i2));
@@ -197,48 +250,49 @@ int init_lws_create(void)
     i2.origin = "origin";
     i2.protocol = protocols[1].name;
     i2.pwsi = &wsi_voice;
-    lws_client_connect_via_info(&i2);
-
-    lws_retry = false;
+    if (!lws_client_connect_via_info(&i2)) {
+        printf("voice websocket connection start failed\n");
+        lws_context_destroy(context);
+        context = NULL;
+        wsi_cmd = NULL;
+        return -1;
+    }
 
     return 0;
 }
 
 int init_lwsc(void) {
+    if (lws_thread_started)
+        return 0;
 
-    if( 0 != init_lws_create() ){
-        RK_LOGE("create lws link fail!");
-        wsi_cmd = NULL;
-        wsi_voice = NULL;       
+    lws_stop = false;
+    lws_reconnect_requested = false;
+    if (pthread_create(&lws_thread, NULL, lws_task, NULL) != 0) {
+        RK_LOGE("create lws task fail!");
         return -1;
     }
-    
-    pthread_t lws_thread;
-    pthread_create(&lws_thread, NULL, lws_task, NULL);
-    pthread_detach(lws_thread);
-
-    sleep(2);
-    lws_send_message( wsi_cmd, "{\"msgid\":0,\"cmd\":\"hello\"}" );
+    lws_thread_started = true;
 
     return 0;
 }
 
 void deinit_lwsc(void)
 {
-    if( context )
-        lws_context_destroy(context);
-    context = NULL;
+    lws_stop = true;
+    if (context)
+        lws_cancel_service(context);
+    if (lws_thread_started) {
+        pthread_join(lws_thread, NULL);
+        lws_thread_started = false;
+    }
 }
 
 int lwsc_reconnect(void)
 {
-    wsi_cmd = NULL;
-    wsi_voice = NULL;   
-    lws_exit = true;  
-    sleep(2);
-    deinit_lwsc();
-    init_lwsc();
+    if (lws_stop)
+        return 0;
+    lws_reconnect_requested = true;
+    if (context)
+        lws_cancel_service(context);
     return 0;
 }
-
-
