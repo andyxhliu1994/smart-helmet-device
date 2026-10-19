@@ -13,6 +13,7 @@ static bool voice_connected = false;
 static time_t hello_sent_at = 0;
 static pthread_mutex_t notice_lock = PTHREAD_MUTEX_INITIALIZER;
 static char pending_notice[256] = {0};
+static char pending_upload_cmd[32] = {0};
 static RK_U64 pending_msgid = 0;
 static time_t notice_sent_at = 0;
 static bool notice_waiting_ack = false;
@@ -151,17 +152,28 @@ static int ws_callback_cmd(struct lws *wsi, enum lws_callback_reasons reason,
                     cJSON *id = cJSON_GetObjectItem(pJsonRoot, "msgid");
                     cJSON *status = cJSON_GetObjectItem(pJsonRoot, "status");
                     cJSON *error_code = cJSON_GetObjectItem(pJsonRoot, "error_code");
+                    enum snd_id prompt = SND_NULL;
                     pthread_mutex_lock(&notice_lock);
                     if (notice_waiting_ack && cJSON_IsNumber(id) &&
-                        (RK_U64)id->valuedouble == pending_msgid && cJSON_IsString(status)) {
+                        (RK_U64)id->valuedouble == pending_msgid && cJSON_IsString(status) &&
+                        (strcmp(status->valuestring, "accepted") == 0 ||
+                         strcmp(status->valuestring, "rejected") == 0)) {
                         RK_LOGI("upload ack: msgid=%llu status=%s error=%s",
                                 (unsigned long long)pending_msgid, status->valuestring,
                                 cJSON_IsString(error_code) ? error_code->valuestring : "");
+                        if (strcmp(status->valuestring, "accepted") == 0)
+                            prompt = SND_UPLOAD_ACCEPTED;
+                        else if (strcmp(pending_upload_cmd, "upload_jpeg") == 0)
+                            prompt = SND_UPLOAD_PHOTO_REJECTED;
+                        else
+                            prompt = SND_UPLOAD_AUDIO_REJECTED;
                         pending_notice[0] = '\0';
+                        pending_upload_cmd[0] = '\0';
                         notice_waiting_ack = false;
                         notice_sent_at = 0;
                     }
                     pthread_mutex_unlock(&notice_lock);
+                    if (prompt != SND_NULL) ao_play_snd(prompt);
                     cJSON_Delete(pJsonRoot);
                     break;
                 }
@@ -402,15 +414,19 @@ void *lws_task(void *arg) {
                 lws_reconnect_requested = true;
             }
             pthread_mutex_lock(&notice_lock);
+            bool ack_timed_out = false;
             if (notice_waiting_ack && notice_sent_at &&
                 time(NULL) - notice_sent_at >= UPLOAD_ACK_TIMEOUT_SECONDS) {
                 RK_LOGE("upload ack timeout: msgid=%llu", (unsigned long long)pending_msgid);
                 pending_notice[0] = '\0';
+                pending_upload_cmd[0] = '\0';
                 notice_waiting_ack = false;
                 notice_sent_at = 0;
+                ack_timed_out = true;
             }
             bool notice_ready = pending_notice[0] && !notice_waiting_ack;
             pthread_mutex_unlock(&notice_lock);
+            if (ack_timed_out) ao_play_snd(SND_UPLOAD_ACK_TIMEOUT);
             if (notice_ready && hello_accepted && wsi_cmd)
                 lws_callback_on_writable(wsi_cmd);
             pthread_mutex_lock(&voice_lock);
@@ -439,6 +455,7 @@ void *lws_task(void *arg) {
         hello_sent_at = 0;
         pthread_mutex_lock(&notice_lock);
         pending_notice[0] = '\0';
+        pending_upload_cmd[0] = '\0';
         notice_waiting_ack = false;
         notice_sent_at = 0;
         pthread_mutex_unlock(&notice_lock);
@@ -580,6 +597,7 @@ int lwsc_send_upload_notice(const char *cmd, const char *file, RK_U64 msgid)
     pthread_mutex_lock(&notice_lock);
     if (!pending_notice[0] && strlen(payload) < sizeof(pending_notice)) {
         strcpy(pending_notice, payload);
+        snprintf(pending_upload_cmd, sizeof(pending_upload_cmd), "%s", cmd);
         pending_msgid = msgid;
         result = 0;
     }

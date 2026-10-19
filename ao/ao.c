@@ -312,7 +312,7 @@ void *ao_play_task(void *arg) {
             fflush(stdout); 
         }
 
-        usleep( 1000 * 20 /2 );        
+        usleep(1000 * 20);
     }
 	ao_playing = false;
     printf("ao pcm play task end\n");
@@ -331,13 +331,18 @@ int ao_play_snd( enum snd_id snd )
 		case 5: file_name = "ka.pcm";break;	
 		case 10:file_name = "connectfailed.pcm";break;	
 		case 11:file_name = "connected.pcm";break;	
-		case 12:file_name = "connectfailed.pcm";break;	
+		case 12:file_name = "connectfailed.pcm";break;
+		case SND_UPLOAD_ACCEPTED: file_name = "upload_accepted.pcm"; break;
+		case SND_UPLOAD_NETWORK_ERROR: file_name = "upload_network_error.pcm"; break;
+		case SND_UPLOAD_PHOTO_REJECTED: file_name = "upload_photo_rejected.pcm"; break;
+		case SND_UPLOAD_AUDIO_REJECTED: file_name = "upload_audio_rejected.pcm"; break;
+		case SND_UPLOAD_ACK_TIMEOUT: file_name = "upload_ack_timeout.pcm"; break;
 		default: file_name = "di.pcm";break;			
 	}
 	if( file_name == NULL )
 		return -1;
 
-	sprintf(conf_file_path, "%s/%s", sndFileDir ,file_name );
+	snprintf(conf_file_path, sizeof(conf_file_path), "%s/%s", sndFileDir, file_name);
 
 	FILE* f = fopen( conf_file_path , "rb");
 	if (f == NULL) {

@@ -161,13 +161,19 @@ RK_S32 upload_lwsc( char* cmd_str, char* file_name, char* file_path )
 	char saved_file[128] = {0};
 	if (!lwsc_is_ready()) {
 		RK_LOGE("upload skipped: websocket not ready");
+		ao_play_snd(SND_UPLOAD_NETWORK_ERROR);
 		return -1;
 	}
 	if (upload_file(httpServerUrl, file_path, saved_file, sizeof(saved_file)) != 0) {
 		RK_LOGE("upload failed: %s", file_name);
+		ao_play_snd(SND_UPLOAD_NETWORK_ERROR);
 		return -1;
 	}
-	return lwsc_send_upload_notice(cmd_str, saved_file, g_msgid++);
+	if (lwsc_send_upload_notice(cmd_str, saved_file, g_msgid++) != 0) {
+		ao_play_snd(SND_UPLOAD_NETWORK_ERROR);
+		return -1;
+	}
+	return 0;
 }
 
 

@@ -130,6 +130,17 @@ void *power_task(void *arg)
              key_t++;
              if( key_t >= 4 ){
                 key_t = 0;
+				if (getenv("HELMET_DIAG_STARTUP")) {
+					int fd = open("/data/helmet-startup-diag.log", O_WRONLY | O_CREAT | O_APPEND, 0600);
+					if (fd >= 0) {
+						const char event[] = "poweroff_requested_by_power_key\n";
+						write(fd, event, sizeof(event) - 1);
+						fsync(fd);
+						close(fd);
+					}
+					/* 诊断期间记录电源键事件，不执行关机，避免误触中断联调。 */
+					continue;
+				}
                 ao_play_snd( SND_POWEROFF );
                 RK_LOGW("will poweroff");
                 sleep(2);
@@ -186,6 +197,4 @@ void deinit_keys(void)
             close(fds[i]);
     }
 }
-
-
 
