@@ -174,7 +174,7 @@ static int ws_callback_cmd(struct lws *wsi, enum lws_callback_reasons reason,
                     if (cJSON_IsString(id) && id->valuestring && id->valuestring[0] &&
                         strlen(id->valuestring) < sizeof(active_voice_id)) {
                         pthread_mutex_lock(&voice_lock);
-                        if (voice_active || ao_playing) {
+                        if (protocol_only_mode || voice_active || ao_playing) {
                             queue_voice_status_locked(id->valuestring, "failed", "PLAYER_BUSY");
                         } else if (!cJSON_IsString(format) || strcmp(format->valuestring, "pcm_s16le") != 0 ||
                                    !cJSON_IsNumber(rate) || rate->valueint != 16000 ||

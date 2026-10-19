@@ -371,6 +371,7 @@ typedef struct {
 } CircularBuffer;
 extern CircularBuffer ao_play_cb;
 extern bool ao_playing ;
+extern bool protocol_only_mode;
 
 enum snd_id{
 	SND_NULL = 0,

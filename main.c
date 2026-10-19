@@ -12,6 +12,7 @@
 #include "key.h"
 
 #define POWERON_PROMPT_MARKER "/tmp/helmet_poweron_prompted"
+bool protocol_only_mode = false;
 
 static void play_poweron_prompt_once(void)
 {
@@ -31,6 +32,17 @@ int main(int argc, char *argv[]) {
 	if ( 0 != ( s32Ret = init_common( argc, argv ) )  ){
 		RK_LOGE("init common fail! %d", s32Ret );
 		goto __FAILED;
+	}
+	/* 仅供联调：验证设备自身的 WebSocket 链路，不占用摄像头/音频/按键。 */
+	if (getenv("HELMET_PROTOCOL_ONLY") && strcmp(getenv("HELMET_PROTOCOL_ONLY"), "1") == 0) {
+		protocol_only_mode = true;
+		init_httpc();
+		init_lwsc();
+		while (!quit) sleep(1);
+		deinit_lwsc();
+		deinit_httpc();
+		deinit_common();
+		return 0;
 	}
 	if( 0 != init_app_sh() ) {
 		RK_LOGE("init sh fail!" );
