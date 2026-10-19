@@ -370,7 +370,6 @@ typedef struct {
     int size;                     // 当前缓冲区中的元素个数
 } CircularBuffer;
 extern CircularBuffer ao_play_cb;
-extern int lws_audio_recv_t;
 extern bool ao_playing ;
 
 enum snd_id{
@@ -403,6 +402,7 @@ int is_full(CircularBuffer* cb) ;
 int write_to_buffer(CircularBuffer* cb, uint8_t* data, int data_len) ;
 // 从缓冲区读取数据
 int read_from_buffer(CircularBuffer* cb, uint8_t* data, int data_len) ;
+int buffered_audio_bytes(CircularBuffer* cb);
 
 /********************************************************** */
 int is_process_running(const char *proc_path) ;
@@ -415,6 +415,8 @@ int init_lwsc(void);
 void deinit_lwsc(void);
 bool lwsc_is_ready(void);
 int lwsc_send_upload_notice(const char *cmd, const char *file, RK_U64 msgid);
+bool lwsc_voice_was_cancelled(void);
+void lwsc_voice_playback_progress(int bytes, bool failed);
 void lws_send_message(struct lws *wsi, const char *message);
 
 /************************************************************* */

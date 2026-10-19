@@ -16,9 +16,19 @@ static char pending_notice[256] = {0};
 static RK_U64 pending_msgid = 0;
 static time_t notice_sent_at = 0;
 static bool notice_waiting_ack = false;
+static pthread_mutex_t voice_lock = PTHREAD_MUTEX_INITIALIZER;
+static char active_voice_id[96] = {0};
+static char pending_voice_status[256] = {0};
+static bool voice_active = false;
+static bool voice_cancelled = false;
+static RK_U64 voice_received_bytes = 0;
+static RK_U64 voice_played_bytes = 0;
+static RK_U64 voice_total_bytes = 0;
+static time_t voice_end_at = 0;
 
 #define HELLO_ACK_TIMEOUT_SECONDS 5
 #define UPLOAD_ACK_TIMEOUT_SECONDS 5
+#define VOICE_END_TIMEOUT_SECONDS 5
 #define DEVICE_PROTOCOL_VERSION "1.0"
 #define DEVICE_APP_VERSION "1.0.0"
 
@@ -26,6 +36,32 @@ static bool notice_waiting_ack = false;
 
 int init_lws_create(void);
 int lwsc_reconnect(void);
+
+static void queue_voice_status_locked(const char *id, const char *status, const char *error_code)
+{
+    cJSON *json = cJSON_CreateObject();
+    if (!json) return;
+    cJSON_AddStringToObject(json, "cmd", "voice_status");
+    cJSON_AddStringToObject(json, "voice_id", id);
+    cJSON_AddStringToObject(json, "status", status);
+    if (error_code) cJSON_AddStringToObject(json, "error_code", error_code);
+    char *payload = cJSON_PrintUnformatted(json);
+    if (payload && strlen(payload) < sizeof(pending_voice_status))
+        strcpy(pending_voice_status, payload);
+    free(payload);
+    cJSON_Delete(json);
+    if (context) lws_cancel_service(context);
+}
+
+static void complete_voice_if_ready_locked(void)
+{
+    if (voice_active && voice_end_at && voice_received_bytes == voice_total_bytes &&
+        voice_played_bytes >= voice_total_bytes) {
+        queue_voice_status_locked(active_voice_id, "completed", NULL);
+        voice_active = false;
+        active_voice_id[0] = '\0';
+    }
+}
 
 // 事件回调函数
 static int ws_callback_cmd(struct lws *wsi, enum lws_callback_reasons reason,
@@ -40,7 +76,7 @@ static int ws_callback_cmd(struct lws *wsi, enum lws_callback_reasons reason,
             lws_callback_on_writable(wsi);
             break;
 
-        case LWS_CALLBACK_CLIENT_WRITEABLE:
+        case LWS_CALLBACK_CLIENT_WRITEABLE: {
             if (cmd_hello_pending) {
                 cJSON *hello = cJSON_CreateObject();
                 cJSON_AddStringToObject(hello, "cmd", "hello");
@@ -55,16 +91,27 @@ static int ws_callback_cmd(struct lws *wsi, enum lws_callback_reasons reason,
                 }
                 cJSON_Delete(hello);
                 cmd_hello_pending = false;
+                break;
             }
+            bool notice_sent = false;
             pthread_mutex_lock(&notice_lock);
             if (hello_accepted && pending_notice[0] && !notice_waiting_ack) {
                 lws_send_message(wsi, pending_notice);
                 notice_waiting_ack = true;
                 notice_sent_at = time(NULL);
+                notice_sent = true;
                 RK_LOGI("upload notice sent: msgid=%llu", (unsigned long long)pending_msgid);
             }
             pthread_mutex_unlock(&notice_lock);
+            if (notice_sent) break;
+            pthread_mutex_lock(&voice_lock);
+            if (hello_accepted && pending_voice_status[0]) {
+                lws_send_message(wsi, pending_voice_status);
+                pending_voice_status[0] = '\0';
+            }
+            pthread_mutex_unlock(&voice_lock);
             break;
+        }
 
         case LWS_CALLBACK_CLIENT_RECEIVE:{
             printf("CMD 收到消息: %.*s\n", (int)len, (char *)in);
@@ -119,6 +166,84 @@ static int ws_callback_cmd(struct lws *wsi, enum lws_callback_reasons reason,
                     break;
                 }
 
+                if (strcmp(cmd, "voice_start") == 0) {
+                    cJSON *id = cJSON_GetObjectItem(pJsonRoot, "voice_id");
+                    cJSON *format = cJSON_GetObjectItem(pJsonRoot, "format");
+                    cJSON *rate = cJSON_GetObjectItem(pJsonRoot, "sample_rate");
+                    cJSON *channels = cJSON_GetObjectItem(pJsonRoot, "channels");
+                    if (cJSON_IsString(id) && id->valuestring && id->valuestring[0] &&
+                        strlen(id->valuestring) < sizeof(active_voice_id)) {
+                        pthread_mutex_lock(&voice_lock);
+                        if (voice_active || ao_playing) {
+                            queue_voice_status_locked(id->valuestring, "failed", "PLAYER_BUSY");
+                        } else if (!cJSON_IsString(format) || strcmp(format->valuestring, "pcm_s16le") != 0 ||
+                                   !cJSON_IsNumber(rate) || rate->valueint != 16000 ||
+                                   !cJSON_IsNumber(channels) || channels->valueint != 1) {
+                            queue_voice_status_locked(id->valuestring, "failed", "UNSUPPORTED_FORMAT");
+                        } else {
+                            init_buffer(&ao_play_cb);
+                            strcpy(active_voice_id, id->valuestring);
+                            voice_active = true;
+                            voice_cancelled = false;
+                            voice_received_bytes = 0;
+                            voice_played_bytes = 0;
+                            voice_total_bytes = 0;
+                            voice_end_at = 0;
+                        }
+                        pthread_mutex_unlock(&voice_lock);
+                    }
+                    cJSON_Delete(pJsonRoot);
+                    break;
+                }
+                if (strcmp(cmd, "voice_end") == 0) {
+                    cJSON *id = cJSON_GetObjectItem(pJsonRoot, "voice_id");
+                    cJSON *total = cJSON_GetObjectItem(pJsonRoot, "total_bytes");
+                    pthread_mutex_lock(&voice_lock);
+                    if (voice_active && cJSON_IsString(id) && strcmp(id->valuestring, active_voice_id) == 0 &&
+                        cJSON_IsNumber(total) && total->valuedouble >= 0) {
+                        voice_total_bytes = (RK_U64)total->valuedouble;
+                        voice_end_at = time(NULL);
+                        if (voice_received_bytes > voice_total_bytes) {
+                            queue_voice_status_locked(active_voice_id, "failed", "INCOMPLETE_AUDIO");
+                            voice_active = false;
+                            voice_cancelled = true;
+                            init_buffer(&ao_play_cb);
+                        } else {
+                            if (!ao_playing && buffered_audio_bytes(&ao_play_cb) > 0) {
+                                pthread_t ao_thread;
+                                ao_playing = true;
+                                if (pthread_create(&ao_thread, NULL, ao_play_task, (void *)1) == 0)
+                                    pthread_detach(ao_thread);
+                                else {
+                                    ao_playing = false;
+                                    queue_voice_status_locked(active_voice_id, "failed", "INTERNAL_ERROR");
+                                    voice_active = false;
+                                }
+                            }
+                            complete_voice_if_ready_locked();
+                        }
+                    }
+                    pthread_mutex_unlock(&voice_lock);
+                    cJSON_Delete(pJsonRoot);
+                    break;
+                }
+                if (strcmp(cmd, "voice_cancel") == 0) {
+                    cJSON *id = cJSON_GetObjectItem(pJsonRoot, "voice_id");
+                    if (cJSON_IsString(id)) {
+                        pthread_mutex_lock(&voice_lock);
+                        if (voice_active && strcmp(id->valuestring, active_voice_id) == 0) {
+                            voice_active = false;
+                            voice_cancelled = true;
+                            init_buffer(&ao_play_cb);
+                            active_voice_id[0] = '\0';
+                        }
+                        queue_voice_status_locked(id->valuestring, "cancelled", NULL);
+                        pthread_mutex_unlock(&voice_lock);
+                    }
+                    cJSON_Delete(pJsonRoot);
+                    break;
+                }
+
                 cJSON_Delete(pJsonRoot);  
             }else{
                 RK_LOGE("cmd parse error\n");
@@ -166,7 +291,6 @@ static int ws_callback_cmd(struct lws *wsi, enum lws_callback_reasons reason,
 }
 
 // 事件回调函数
-int lws_audio_recv_t = 0;
 static int ws_callback_voice(struct lws *wsi, enum lws_callback_reasons reason,
                            void *user, void *in, size_t len) {
     switch (reason) {
@@ -177,18 +301,32 @@ static int ws_callback_voice(struct lws *wsi, enum lws_callback_reasons reason,
             break;
 
         case LWS_CALLBACK_CLIENT_RECEIVE:
-            lws_audio_recv_t++;
-            write_to_buffer( &ao_play_cb, (uint8_t*)in, len); 
-            if( g_debug ){
-                struct timeval tv;
-                gettimeofday(&tv, NULL);  // 获取当前时间
-                printf( "voice recv len:%ld time:%ld\n", len, tv.tv_sec );  
+            pthread_mutex_lock(&voice_lock);
+            if (voice_active && len > 0) {
+                if (write_to_buffer(&ao_play_cb, (uint8_t *)in, (int)len) != 0) {
+                    queue_voice_status_locked(active_voice_id, "failed", "PLAYBACK_ERROR");
+                    voice_active = false;
+                    voice_cancelled = true;
+                    init_buffer(&ao_play_cb);
+                } else {
+                    voice_received_bytes += len;
+                    if (!ao_playing && buffered_audio_bytes(&ao_play_cb) >= FRAME_BYTES * 5) {
+                        pthread_t ao_thread;
+                        ao_playing = true;
+                        if (pthread_create(&ao_thread, NULL, ao_play_task, (void *)1) == 0)
+                            pthread_detach(ao_thread);
+                        else {
+                            ao_playing = false;
+                            queue_voice_status_locked(active_voice_id, "failed", "INTERNAL_ERROR");
+                            voice_active = false;
+                            voice_cancelled = true;
+                            init_buffer(&ao_play_cb);
+                        }
+                    }
+                    complete_voice_if_ready_locked();
+                }
             }
-            if( ( lws_audio_recv_t == AUDIO_FRAME_FREQ_HZ/2 ) && ( !ao_playing )) {
-                pthread_t ao_thread;
-                pthread_create(&ao_thread, NULL, ao_play_task, NULL);
-                pthread_detach(ao_thread);  
-            }
+            pthread_mutex_unlock(&voice_lock);
             break;
            
         case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
@@ -275,6 +413,19 @@ void *lws_task(void *arg) {
             pthread_mutex_unlock(&notice_lock);
             if (notice_ready && hello_accepted && wsi_cmd)
                 lws_callback_on_writable(wsi_cmd);
+            pthread_mutex_lock(&voice_lock);
+            if (voice_active && voice_end_at &&
+                time(NULL) - voice_end_at >= VOICE_END_TIMEOUT_SECONDS &&
+                voice_received_bytes < voice_total_bytes) {
+                queue_voice_status_locked(active_voice_id, "failed", "INCOMPLETE_AUDIO");
+                voice_active = false;
+                voice_cancelled = true;
+                init_buffer(&ao_play_cb);
+            }
+            bool voice_status_ready = pending_voice_status[0] != '\0';
+            pthread_mutex_unlock(&voice_lock);
+            if (voice_status_ready && hello_accepted && wsi_cmd)
+                lws_callback_on_writable(wsi_cmd);
         }
 
         if (context)
@@ -291,6 +442,15 @@ void *lws_task(void *arg) {
         notice_waiting_ack = false;
         notice_sent_at = 0;
         pthread_mutex_unlock(&notice_lock);
+        pthread_mutex_lock(&voice_lock);
+        voice_active = false;
+        voice_cancelled = true;
+        active_voice_id[0] = '\0';
+        pending_voice_status[0] = '\0';
+        voice_received_bytes = voice_played_bytes = voice_total_bytes = 0;
+        voice_end_at = 0;
+        init_buffer(&ao_play_cb);
+        pthread_mutex_unlock(&voice_lock);
 
         if (!quit && !lws_stop)
             wait_before_reconnect();
@@ -427,4 +587,29 @@ int lwsc_send_upload_notice(const char *cmd, const char *file, RK_U64 msgid)
     free(payload);
     if (result == 0 && context) lws_cancel_service(context);
     return result;
+}
+
+bool lwsc_voice_was_cancelled(void)
+{
+    pthread_mutex_lock(&voice_lock);
+    bool cancelled = voice_cancelled;
+    pthread_mutex_unlock(&voice_lock);
+    return cancelled;
+}
+
+void lwsc_voice_playback_progress(int bytes, bool failed)
+{
+    pthread_mutex_lock(&voice_lock);
+    if (voice_active) {
+        if (failed) {
+            queue_voice_status_locked(active_voice_id, "failed", "PLAYBACK_ERROR");
+            voice_active = false;
+            voice_cancelled = true;
+            init_buffer(&ao_play_cb);
+        } else {
+            voice_played_bytes += bytes;
+            complete_voice_if_ready_locked();
+        }
+    }
+    pthread_mutex_unlock(&voice_lock);
 }

@@ -633,10 +633,14 @@ void rk_signal_reset(void *sem) { rk_signal_give(sem); }
 
 /******************************************************* */
 // 初始化缓冲区
+static pthread_mutex_t audio_buffer_lock = PTHREAD_MUTEX_INITIALIZER;
+
 void init_buffer(CircularBuffer* cb) {
+    pthread_mutex_lock(&audio_buffer_lock);
     cb->read_pos = 0;
     cb->write_pos = 0;
     cb->size = 0;
+    pthread_mutex_unlock(&audio_buffer_lock);
 }
 // 检查缓冲区是否为空
 int is_empty(CircularBuffer* cb) {
@@ -648,33 +652,44 @@ int is_full(CircularBuffer* cb) {
 }
 // 写数据到缓冲区
 int write_to_buffer(CircularBuffer* cb, uint8_t* data, int data_len) {
-    if (data_len <= 0) 
-        return -1;  // 数据长度必须大于 0
+    if (!data || data_len <= 0) return -1;
+    pthread_mutex_lock(&audio_buffer_lock);
+    if (data_len > RING_BUFFER_SIZE - cb->size) {
+        pthread_mutex_unlock(&audio_buffer_lock);
+        return -1;
+    }
     for (int i = 0; i < data_len; i++) {
-        if (is_full(cb)) 
-            return -1;  // 缓冲区已满，无法继续写入
         cb->buffer[cb->write_pos] = data[i];// 写数据
         cb->write_pos = (cb->write_pos + 1) % RING_BUFFER_SIZE;  // 循环写指针
         cb->size++;
     }
-    return 0;  // 成功写入
+    pthread_mutex_unlock(&audio_buffer_lock);
+    return 0;
 }
 // 从缓冲区读取数据
 int read_from_buffer(CircularBuffer* cb, uint8_t* data, int data_len) {
-    if (is_empty(cb)) {
-        return -1;  // 缓冲区为空，无法读取
+    if (!data || data_len <= 0) return -1;
+    pthread_mutex_lock(&audio_buffer_lock);
+    int bytes = cb->size < data_len ? cb->size : data_len;
+    if (bytes == 0) {
+        pthread_mutex_unlock(&audio_buffer_lock);
+        return -1;
     }
-    if (data_len > cb->size) {
-        cb->size -= data_len;
-        cb->read_pos = ( cb->read_pos + data_len ) % RING_BUFFER_SIZE; 
-        return -2;
-    }
-    for (int i = 0; i < data_len; i++) {// 按照固定长度读取数据
+    for (int i = 0; i < bytes; i++) {
         data[i] = cb->buffer[cb->read_pos];
         cb->read_pos = (cb->read_pos + 1) % RING_BUFFER_SIZE;  // 循环读指针
-        cb->size--;        
+        cb->size--;
     }
-    return 0;  // 成功读取
+    pthread_mutex_unlock(&audio_buffer_lock);
+    if (bytes < data_len) memset(data + bytes, 0, data_len - bytes);
+    return bytes;
+}
+
+int buffered_audio_bytes(CircularBuffer* cb) {
+    pthread_mutex_lock(&audio_buffer_lock);
+    int bytes = cb->size;
+    pthread_mutex_unlock(&audio_buffer_lock);
+    return bytes;
 }
 
 /*********************************************************** */

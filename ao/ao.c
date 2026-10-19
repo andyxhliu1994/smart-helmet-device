@@ -265,9 +265,9 @@ CircularBuffer ao_play_cb;
 bool ao_playing = false;
 
 void *ao_play_task(void *arg) {
+    bool voice_task = arg != NULL;
     printf("ao pcm play task start\n");
     uint8_t read_data[FIXED_READ_LENGTH] ={0};
-    uint8_t read_data_bk[FIXED_READ_LENGTH] ={0};    
     RK_U64 timeStamp = 0;
     AUDIO_FRAME_S frame;
 	RK_S32 s32MilliSec = -1;
@@ -275,24 +275,18 @@ void *ao_play_task(void *arg) {
 
     while( !quit ){
 		ao_playing = true ;
+		if (voice_task && lwsc_voice_was_cancelled()) break;
 
 		if( i > 30 ){
 			printf("ao play task no data timeout\n");
-			lws_audio_recv_t = 0;
 			break;
 		}
         RK_S32 ret = read_from_buffer(&ao_play_cb, read_data, FIXED_READ_LENGTH );
         if( ret == -1 ){
 			i++;
             memset(read_data, 0, FIXED_READ_LENGTH );
-        }else if( ret == -2 ){
-			i++;
-            memcpy(read_data, read_data_bk, FIXED_READ_LENGTH );
-            if( g_debug )
-                printf("repeat frame\n");
         }else{
 			i=0;
-			memcpy(read_data_bk, read_data, FIXED_READ_LENGTH );
 		}
             
         frame.u32Len = FIXED_READ_LENGTH;
@@ -310,6 +304,8 @@ void *ao_play_task(void *arg) {
         RK_S32 result = RK_MPI_AO_SendFrame(0, 0, &frame, s32MilliSec);
         if (result < 0) 
            RK_LOGE("send frame fail, result = %d", result);   
+        if (voice_task && ret > 0)
+            lwsc_voice_playback_progress(ret, result < 0);
         RK_MPI_MB_ReleaseMB(frame.pMbBlk);
         if( g_debug ){
             printf( "#" );
@@ -363,9 +359,10 @@ int ao_play_snd( enum snd_id snd )
 
 	if( false == ao_playing ){
 		pthread_t ao_thread;
-		pthread_create(&ao_thread, NULL, ao_play_task, NULL);
-		pthread_detach(ao_thread);  
+		ao_playing = true;
+		if (pthread_create(&ao_thread, NULL, ao_play_task, NULL) == 0)
+			pthread_detach(ao_thread);
+		else ao_playing = false;
 	}
 	return 0;
 }
-
