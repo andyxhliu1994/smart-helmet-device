@@ -158,25 +158,16 @@ RK_S32 deinit_rtsp()
 
 RK_S32 upload_lwsc( char* cmd_str, char* file_name, char* file_path )
 {
-	cJSON *json = cJSON_CreateObject();
-	cJSON_AddNumberToObject(json, "msgid", g_msgid++);
-	cJSON_AddStringToObject(json, "cmd",  cmd_str );
-	cJSON_AddStringToObject(json, "file", file_name );
-	CURLcode res = upload_file( httpServerUrl, file_path );
-	char res_str[32] = {0};
-	if( CURLE_OK == res )
-		cJSON_AddStringToObject(json, "msg", "success" );
-	else{
-		sprintf( res_str, "failed:%d", (int)res );
-		cJSON_AddStringToObject(json, "msg", res_str );
+	char saved_file[128] = {0};
+	if (!lwsc_is_ready()) {
+		RK_LOGE("upload skipped: websocket not ready");
+		return -1;
 	}
-	char *json_string = cJSON_PrintUnformatted(json); // 获取格式化的 JSON 字符串
-	printf("Generated JSON: %s\n", json_string);
-	lws_send_message( wsi_cmd, json_string );
-
-	cJSON_Delete(json); // 释放 json 对象占用的内存
-	free(json_string);  // 释放 json_string 的内存
-	return 0;
+	if (upload_file(httpServerUrl, file_path, saved_file, sizeof(saved_file)) != 0) {
+		RK_LOGE("upload failed: %s", file_name);
+		return -1;
+	}
+	return lwsc_send_upload_notice(cmd_str, saved_file, g_msgid++);
 }
 
 

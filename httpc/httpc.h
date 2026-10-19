@@ -8,10 +8,6 @@ void deinit_httpc(void);
 
 
 
-/**
-    result = upload_file( httpServerUrl, "/tmp/out.png");
-    if (result == CURLE_OK) 
-        printf("文件上传成功！\n");
- */
+/* upload_file() validates HTTP 200 and {"code":0,"file":"..."}. */
 
 #endif

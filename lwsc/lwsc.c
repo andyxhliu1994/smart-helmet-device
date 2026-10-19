@@ -8,6 +8,19 @@ static bool lws_thread_started = false;
 static volatile bool lws_stop = false;
 static volatile bool lws_reconnect_requested = false;
 static bool cmd_hello_pending = false;
+static bool hello_accepted = false;
+static bool voice_connected = false;
+static time_t hello_sent_at = 0;
+static pthread_mutex_t notice_lock = PTHREAD_MUTEX_INITIALIZER;
+static char pending_notice[256] = {0};
+static RK_U64 pending_msgid = 0;
+static time_t notice_sent_at = 0;
+static bool notice_waiting_ack = false;
+
+#define HELLO_ACK_TIMEOUT_SECONDS 5
+#define UPLOAD_ACK_TIMEOUT_SECONDS 5
+#define DEVICE_PROTOCOL_VERSION "1.0"
+#define DEVICE_APP_VERSION "1.0.0"
 
 #define LWSC_RECONNECT_SECONDS 10
 
@@ -21,15 +34,36 @@ static int ws_callback_cmd(struct lws *wsi, enum lws_callback_reasons reason,
         case LWS_CALLBACK_CLIENT_ESTABLISHED:
             printf("cmd 连接建立成功!\n");// 在这里保存对应的 wsi 句柄
             wsi_cmd = wsi;
+            hello_accepted = false;
+            hello_sent_at = 0;
             cmd_hello_pending = true;
             lws_callback_on_writable(wsi);
             break;
 
         case LWS_CALLBACK_CLIENT_WRITEABLE:
             if (cmd_hello_pending) {
-                lws_send_message(wsi, "{\"msgid\":0,\"cmd\":\"hello\"}");
+                cJSON *hello = cJSON_CreateObject();
+                cJSON_AddStringToObject(hello, "cmd", "hello");
+                cJSON_AddStringToObject(hello, "sn", devSn);
+                cJSON_AddStringToObject(hello, "protocol_version", DEVICE_PROTOCOL_VERSION);
+                cJSON_AddStringToObject(hello, "app_version", DEVICE_APP_VERSION);
+                char *payload = cJSON_PrintUnformatted(hello);
+                if (payload) {
+                    lws_send_message(wsi, payload);
+                    free(payload);
+                    hello_sent_at = time(NULL);
+                }
+                cJSON_Delete(hello);
                 cmd_hello_pending = false;
             }
+            pthread_mutex_lock(&notice_lock);
+            if (hello_accepted && pending_notice[0] && !notice_waiting_ack) {
+                lws_send_message(wsi, pending_notice);
+                notice_waiting_ack = true;
+                notice_sent_at = time(NULL);
+                RK_LOGI("upload notice sent: msgid=%llu", (unsigned long long)pending_msgid);
+            }
+            pthread_mutex_unlock(&notice_lock);
             break;
 
         case LWS_CALLBACK_CLIENT_RECEIVE:{
@@ -42,10 +76,48 @@ static int ws_callback_cmd(struct lws *wsi, enum lws_callback_reasons reason,
             cJSON *pJsonRoot = cJSON_Parse( cmd_str );
             if(pJsonRoot !=NULL){
 		        cJSON *pValue = cJSON_GetObjectItem(pJsonRoot, "cmd");
-                if((pValue != NULL) &&( cJSON_IsString(pValue)))     strcpy( cmd ,pValue->valuestring );  
+                if((pValue != NULL) && cJSON_IsString(pValue))
+                    snprintf(cmd, sizeof(cmd), "%s", pValue->valuestring);
 
-                pValue = cJSON_GetObjectItem(pJsonRoot, "msgid");
-                if((pValue != NULL) &&( cJSON_IsNumber(pValue)))     g_msgid=pValue->valueint;  
+                if (strcmp(cmd, "hello_ack") == 0) {
+                    cJSON *status = cJSON_GetObjectItem(pJsonRoot, "status");
+                    cJSON *error_code = cJSON_GetObjectItem(pJsonRoot, "error_code");
+                    hello_accepted = status && cJSON_IsString(status) &&
+                                     strcmp(status->valuestring, "accepted") == 0;
+                    hello_sent_at = 0;
+                    if (!hello_accepted) {
+                        RK_LOGE("hello rejected: %s", error_code && cJSON_IsString(error_code)
+                                ? error_code->valuestring : "unknown");
+                        lwsc_reconnect();
+                    }
+                    cJSON_Delete(pJsonRoot);
+                    break;
+                }
+
+                if (!hello_accepted) {
+                    RK_LOGW("ignore command before hello_ack: %s", cmd);
+                    cJSON_Delete(pJsonRoot);
+                    break;
+                }
+
+                if (strcmp(cmd, "ack") == 0) {
+                    cJSON *id = cJSON_GetObjectItem(pJsonRoot, "msgid");
+                    cJSON *status = cJSON_GetObjectItem(pJsonRoot, "status");
+                    cJSON *error_code = cJSON_GetObjectItem(pJsonRoot, "error_code");
+                    pthread_mutex_lock(&notice_lock);
+                    if (notice_waiting_ack && cJSON_IsNumber(id) &&
+                        (RK_U64)id->valuedouble == pending_msgid && cJSON_IsString(status)) {
+                        RK_LOGI("upload ack: msgid=%llu status=%s error=%s",
+                                (unsigned long long)pending_msgid, status->valuestring,
+                                cJSON_IsString(error_code) ? error_code->valuestring : "");
+                        pending_notice[0] = '\0';
+                        notice_waiting_ack = false;
+                        notice_sent_at = 0;
+                    }
+                    pthread_mutex_unlock(&notice_lock);
+                    cJSON_Delete(pJsonRoot);
+                    break;
+                }
 
                 cJSON_Delete(pJsonRoot);  
             }else{
@@ -75,6 +147,7 @@ static int ws_callback_cmd(struct lws *wsi, enum lws_callback_reasons reason,
         case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
             printf("cmd 连接失败\n");
             wsi_cmd = NULL;
+            hello_accepted = false;
             lwsc_reconnect();
             break;
 
@@ -82,6 +155,7 @@ static int ws_callback_cmd(struct lws *wsi, enum lws_callback_reasons reason,
         case LWS_CALLBACK_CLIENT_CLOSED:
             printf("cmd 连接断开\n");
             wsi_cmd = NULL;
+            hello_accepted = false;
             lwsc_reconnect();
             break;
 
@@ -99,6 +173,7 @@ static int ws_callback_voice(struct lws *wsi, enum lws_callback_reasons reason,
         case LWS_CALLBACK_CLIENT_ESTABLISHED:
             printf("voice 连接建立成功!\n");// 在这里保存对应的 wsi 句柄
             wsi_voice = wsi;
+            voice_connected = true;
             break;
 
         case LWS_CALLBACK_CLIENT_RECEIVE:
@@ -119,6 +194,7 @@ static int ws_callback_voice(struct lws *wsi, enum lws_callback_reasons reason,
         case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
             printf("voice 连接失败\n");
             wsi_voice = NULL;
+            voice_connected = false;
             lwsc_reconnect();
             break;
 
@@ -126,6 +202,7 @@ static int ws_callback_voice(struct lws *wsi, enum lws_callback_reasons reason,
         case LWS_CALLBACK_CLIENT_CLOSED:
             printf("voice 连接断开\n");
             wsi_voice = NULL;
+            voice_connected = false;
             lwsc_reconnect();
             break;           
 
@@ -181,6 +258,23 @@ void *lws_task(void *arg) {
                 printf("websocket service error\n");
                 lws_reconnect_requested = true;
             }
+            if (hello_sent_at && !hello_accepted &&
+                time(NULL) - hello_sent_at >= HELLO_ACK_TIMEOUT_SECONDS) {
+                RK_LOGE("hello_ack timeout");
+                lws_reconnect_requested = true;
+            }
+            pthread_mutex_lock(&notice_lock);
+            if (notice_waiting_ack && notice_sent_at &&
+                time(NULL) - notice_sent_at >= UPLOAD_ACK_TIMEOUT_SECONDS) {
+                RK_LOGE("upload ack timeout: msgid=%llu", (unsigned long long)pending_msgid);
+                pending_notice[0] = '\0';
+                notice_waiting_ack = false;
+                notice_sent_at = 0;
+            }
+            bool notice_ready = pending_notice[0] && !notice_waiting_ack;
+            pthread_mutex_unlock(&notice_lock);
+            if (notice_ready && hello_accepted && wsi_cmd)
+                lws_callback_on_writable(wsi_cmd);
         }
 
         if (context)
@@ -189,6 +283,14 @@ void *lws_task(void *arg) {
         wsi_cmd = NULL;
         wsi_voice = NULL;
         cmd_hello_pending = false;
+        hello_accepted = false;
+        voice_connected = false;
+        hello_sent_at = 0;
+        pthread_mutex_lock(&notice_lock);
+        pending_notice[0] = '\0';
+        notice_waiting_ack = false;
+        notice_sent_at = 0;
+        pthread_mutex_unlock(&notice_lock);
 
         if (!quit && !lws_stop)
             wait_before_reconnect();
@@ -295,4 +397,34 @@ int lwsc_reconnect(void)
     if (context)
         lws_cancel_service(context);
     return 0;
+}
+
+bool lwsc_is_ready(void)
+{
+    return hello_accepted && voice_connected && wsi_cmd && wsi_voice &&
+           !lws_reconnect_requested;
+}
+
+int lwsc_send_upload_notice(const char *cmd, const char *file, RK_U64 msgid)
+{
+    if (!cmd || !file || !lwsc_is_ready()) return -1;
+    cJSON *json = cJSON_CreateObject();
+    if (!json) return -1;
+    cJSON_AddNumberToObject(json, "msgid", (double)msgid);
+    cJSON_AddStringToObject(json, "cmd", cmd);
+    cJSON_AddStringToObject(json, "file", file);
+    char *payload = cJSON_PrintUnformatted(json);
+    cJSON_Delete(json);
+    if (!payload) return -1;
+    int result = -1;
+    pthread_mutex_lock(&notice_lock);
+    if (!pending_notice[0] && strlen(payload) < sizeof(pending_notice)) {
+        strcpy(pending_notice, payload);
+        pending_msgid = msgid;
+        result = 0;
+    }
+    pthread_mutex_unlock(&notice_lock);
+    free(payload);
+    if (result == 0 && context) lws_cancel_service(context);
+    return result;
 }

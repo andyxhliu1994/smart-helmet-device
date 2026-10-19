@@ -413,9 +413,11 @@ extern struct lws *wsi_voice ;
 //
 int init_lwsc(void);
 void deinit_lwsc(void);
+bool lwsc_is_ready(void);
+int lwsc_send_upload_notice(const char *cmd, const char *file, RK_U64 msgid);
 void lws_send_message(struct lws *wsi, const char *message);
 
 /************************************************************* */
-CURLcode upload_file(const char *url, const char *filepath );;
+int upload_file(const char *url, const char *filepath, char *saved_file, size_t saved_file_size);
 
 #endif

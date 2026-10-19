@@ -7,26 +7,29 @@
  * @param filepath 本地文件路径
  * @return 成功返回 CURLE_OK，失败返回相应的错误码
  */
-CURLcode upload_file( const char *url, const char *filepath ) {
+struct upload_response { char text[4096]; size_t length; };
 
-    CURLcode res = CURLE_FAILED_INIT;
-    if( 0 == strlen(url) ){
-        printf("url is null, upload file failed\n");
-        return res;
-    }
-    if (access(filepath, F_OK) == 0) {
-        printf("文件存在： %s\n", filepath);
-    } else {
-        if (errno == ENOENT) {
-            printf("文件不存在： %s\n", filepath);
-        } else if (errno == EACCES) {
-            printf("文件存在，但没有访问权限： %s\n", filepath);
-        } else {
-            perror("发生错误");
-        }
-        return res;
-    }
-    
+static size_t receive_upload_response(char *data, size_t size, size_t count, void *user)
+{
+    struct upload_response *response = (struct upload_response *)user;
+    size_t bytes = size * count;
+    if (bytes >= sizeof(response->text) - response->length)
+        return 0;
+    memcpy(response->text + response->length, data, bytes);
+    response->length += bytes;
+    response->text[response->length] = '\0';
+    return bytes;
+}
+
+int upload_file(const char *url, const char *filepath, char *saved_file, size_t saved_file_size) {
+
+    struct upload_response response = {{0}, 0};
+    long http_status = 0;
+    int result = -1;
+    if (!url || !*url || !filepath || !saved_file || !saved_file_size ||
+        access(filepath, R_OK) != 0) return -1;
+    saved_file[0] = '\0';
+
     CURL *curl;
     // 初始化 libcurl
     curl = curl_easy_init();
@@ -46,33 +49,39 @@ CURLcode upload_file( const char *url, const char *filepath ) {
         curl_easy_setopt(curl, CURLOPT_URL, url);
         curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+        curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, receive_upload_response);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
         // 绑定表单数据
         curl_easy_setopt(curl, CURLOPT_HTTPPOST, formpost);
         // 可选：禁用 Expect: 100-continue，提升小文件上传速度
         headerlist = curl_slist_append(headerlist, buf);
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headerlist);
 
-        int retries = 3 ; // 设置最大重试次数
-        while(retries--) {
-            res = curl_easy_perform(curl);/* 3. 执行上传请求 */
-            if(res == CURLE_OK) {
-                printf("Operation successful!\n");
-                break; // 成功，退出循环
-            } else if(res == CURLE_COULDNT_CONNECT || res == CURLE_OPERATION_TIMEDOUT) {
-                printf("Retrying... %d attempts left\n", retries);
-                continue; // 失败，但可重试，继续循环
-            } else {
-                fprintf(stderr, "curl_easy_perform failed: %s\n", curl_easy_strerror(res));
-                break; // 其他错误，退出循环
+        CURLcode code = curl_easy_perform(curl);
+        if (code == CURLE_OK) curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_status);
+        if (code == CURLE_OK && http_status == 200) {
+            cJSON *body = cJSON_Parse(response.text);
+            if (body) {
+                cJSON *business_code = cJSON_GetObjectItemCaseSensitive(body, "code");
+                cJSON *file = cJSON_GetObjectItemCaseSensitive(body, "file");
+                if (cJSON_IsNumber(business_code) && business_code->valueint == 0 &&
+                    cJSON_IsString(file) && file->valuestring && file->valuestring[0] &&
+                    strlen(file->valuestring) < saved_file_size) {
+                    strcpy(saved_file, file->valuestring);
+                    result = 0;
+                }
+                cJSON_Delete(body);
             }
         }
+        if (result != 0) RK_LOGE("upload failed: curl=%d HTTP=%ld response=%s", (int)code, http_status, response.text);
 
         /* 5. 清理申请的资源 */
         curl_easy_cleanup(curl);
         curl_formfree(formpost);
         curl_slist_free_all(headerlist);
     }
-    return res;
+    return result;
 }
 
 void init_httpc(void)
@@ -90,7 +99,6 @@ void deinit_httpc(void)
     // 全局清理
     curl_global_cleanup();
 }
-
 
 
 
