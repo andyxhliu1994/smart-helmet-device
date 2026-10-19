@@ -337,6 +337,8 @@ int ao_play_snd( enum snd_id snd )
 		case SND_UPLOAD_PHOTO_REJECTED: file_name = "upload_photo_rejected.pcm"; break;
 		case SND_UPLOAD_AUDIO_REJECTED: file_name = "upload_audio_rejected.pcm"; break;
 		case SND_UPLOAD_ACK_TIMEOUT: file_name = "upload_ack_timeout.pcm"; break;
+		case SND_UPLOAD_SERVICE_BUSY: file_name = "upload_service_busy.pcm"; break;
+		case SND_UPLOAD_GENERIC_REJECTED: file_name = "upload_generic_rejected.pcm"; break;
 		default: file_name = "di.pcm";break;			
 	}
 	if( file_name == NULL )

@@ -163,10 +163,17 @@ static int ws_callback_cmd(struct lws *wsi, enum lws_callback_reasons reason,
                                 cJSON_IsString(error_code) ? error_code->valuestring : "");
                         if (strcmp(status->valuestring, "accepted") == 0)
                             prompt = SND_UPLOAD_ACCEPTED;
-                        else if (strcmp(pending_upload_cmd, "upload_jpeg") == 0)
-                            prompt = SND_UPLOAD_PHOTO_REJECTED;
+                        else if (cJSON_IsString(error_code) &&
+                                 (strcmp(error_code->valuestring, "SERVICE_BUSY") == 0 ||
+                                  strcmp(error_code->valuestring, "INTERNAL_ERROR") == 0))
+                            prompt = SND_UPLOAD_SERVICE_BUSY;
+                        else if (cJSON_IsString(error_code) &&
+                                 (strcmp(error_code->valuestring, "FILE_NOT_FOUND") == 0 ||
+                                  strcmp(error_code->valuestring, "INVALID_FILE") == 0))
+                            prompt = strcmp(pending_upload_cmd, "upload_jpeg") == 0
+                                ? SND_UPLOAD_PHOTO_REJECTED : SND_UPLOAD_AUDIO_REJECTED;
                         else
-                            prompt = SND_UPLOAD_AUDIO_REJECTED;
+                            prompt = SND_UPLOAD_GENERIC_REJECTED;
                         pending_notice[0] = '\0';
                         pending_upload_cmd[0] = '\0';
                         notice_waiting_ack = false;
