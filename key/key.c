@@ -37,6 +37,8 @@ bool powerkey_en = false;
 void *key_event_task(void *arg)
 {
     fd_set readfds;
+    bool button_pcm_started = false;
+    bool button_h264_started = false;
     printf("成功监听 %d 个设备，正在等待输入...\n", num_devices);
 
     while ( !quit ) {
@@ -80,14 +82,22 @@ void *key_event_task(void *arg)
                             }
                         }else if( ev.code == 62  ){//录音
                             if( 1 == ev.value ){
-                                start_file_rec( FILE_AI_PCM );
-                                ao_play_snd( SND_REC_AI_S );
+                                if (lwsc_platform_recording()) lwsc_interrupt_platform_recording();
+                                if (start_file_rec(FILE_AI_PCM) == 0) {
+                                    button_pcm_started = true;
+                                    ao_play_snd(SND_REC_AI_S);
+                                }
                             }else{
-                                stop_file_rec();
-                                ao_play_snd( SND_REC_AI_E );
+                                if (button_pcm_started) {
+                                    button_pcm_started = false;
+                                    stop_file_rec();
+                                    ao_play_snd(SND_REC_AI_E);
+                                }
                             }
                         }else if( ev.code == 61  ){//拍照  
                             if( 0 == ev.value ){
+                                if (lwsc_platform_recording()) lwsc_interrupt_platform_recording();
+                                lwsc_interrupt_platform_photo();
                                 take_photo();
                                 ao_play_snd( SND_TAKEPHOTO );
                             }
@@ -105,11 +115,17 @@ void *key_event_task(void *arg)
                             }
                         }else if( ev.code == 59  ){//sos
                             if( 1 == ev.value ){
-                                start_file_rec( FILE_VI_H264 );
-                                ao_play_snd( SND_REC_VI_S );
+                                if (lwsc_platform_recording()) lwsc_interrupt_platform_recording();
+                                if (start_file_rec(FILE_VI_H264) == 0) {
+                                    button_h264_started = true;
+                                    ao_play_snd(SND_REC_VI_S);
+                                }
                             }else{
-                                stop_file_rec();
-                                ao_play_snd( SND_REC_VI_E );
+                                if (button_h264_started) {
+                                    button_h264_started = false;
+                                    stop_file_rec();
+                                    ao_play_snd(SND_REC_VI_E);
+                                }
                             }
                         }
                     }
@@ -197,4 +213,3 @@ void deinit_keys(void)
             close(fds[i]);
     }
 }
-

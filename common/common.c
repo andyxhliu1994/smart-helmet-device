@@ -158,6 +158,12 @@ RK_S32 deinit_rtsp()
 
 RK_S32 upload_lwsc( char* cmd_str, char* file_name, char* file_path )
 {
+	return upload_lwsc_with_cmd_id(cmd_str, file_name, file_path, NULL);
+}
+
+RK_S32 upload_lwsc_with_cmd_id(const char *cmd_str, const char *file_name,
+                               const char *file_path, const char *cmd_id)
+{
 	char saved_file[128] = {0};
 	if (!lwsc_is_ready()) {
 		RK_LOGE("upload skipped: websocket not ready");
@@ -169,7 +175,7 @@ RK_S32 upload_lwsc( char* cmd_str, char* file_name, char* file_path )
 		ao_play_snd(SND_UPLOAD_NETWORK_ERROR);
 		return -1;
 	}
-	if (lwsc_send_upload_notice(cmd_str, saved_file, g_msgid++) != 0) {
+	if (lwsc_send_upload_notice(cmd_str, saved_file, g_msgid++, cmd_id) != 0) {
 		ao_play_snd(SND_UPLOAD_NETWORK_ERROR);
 		return -1;
 	}
@@ -200,6 +206,7 @@ RK_S32 start_file_rec( enum rec_file_t rec_file_type )
 	save_file = fopen( rawFarmeRecPath, "wb");
 	if ( NULL == save_file) {
 		printf("ERROR: open file: %s fail, exit\n", rawFarmeRecPath);
+		rawFarmeRecType = FILE_NULL;
 		return -3;
 	}
 	printf("%s type is %d, recing... \n", rawFarmeRecPath, (int)rawFarmeRecType );
@@ -209,6 +216,22 @@ RK_S32 start_file_rec( enum rec_file_t rec_file_type )
 
 RK_S32 stop_file_rec(void)
 {
+	char file_name[128] = {0};
+	char file_path[256] = {0};
+	enum rec_file_t recorded_type = rawFarmeRecType;
+	RK_S32 result = stop_file_rec_local(file_name, sizeof(file_name),
+	                                     file_path, sizeof(file_path));
+	if (result != 0) return result;
+	if (recorded_type == FILE_AI_PCM)
+		return upload_lwsc_with_cmd_id("upload_pcm", file_name, file_path, NULL);
+	if (recorded_type == FILE_VI_H264)
+		return upload_lwsc_with_cmd_id("upload_h264", file_name, file_path, NULL);
+	return 0;
+}
+
+RK_S32 stop_file_rec_local(char *file_name, size_t file_name_size,
+                           char *file_path, size_t file_path_size)
+{
 	if( NULL == save_file ){
 		printf("rec file is not work\n");
 		return -1;		
@@ -217,25 +240,38 @@ RK_S32 stop_file_rec(void)
 	save_file = NULL;
 
 	struct stat file_info;
-    if (stat(rawFarmeRecPath, &file_info) == 0) {
-        printf("文件 '%s' 的大小为: %ld 字节\n", rawFarmeRecPath, file_info.st_size);
-    } else {
+    if (stat(rawFarmeRecPath, &file_info) != 0) {
         perror("无法获取文件信息");
+        rawFarmeRecType = FILE_NULL;
+        return -2;
     }
-
-	if( FILE_AI_PCM == rawFarmeRecType ){
-		if( file_info.st_size >= 10 *1024 )
-			upload_lwsc( "upload_pcm",  rawFarmeRecFileName, rawFarmeRecPath );
-		else
-			RK_LOGW( "small file, do not upload");
-	}else if( FILE_VI_H264 == rawFarmeRecType ){
-		if( file_info.st_size >= 50 *1024 )
-			upload_lwsc( "upload_h264", rawFarmeRecFileName, rawFarmeRecPath );
-		else
-			RK_LOGW( "small file, do not upload");
+	printf("文件 '%s' 的大小为: %ld 字节\n", rawFarmeRecPath, file_info.st_size);
+	size_t minimum_size = rawFarmeRecType == FILE_VI_H264 ? 50 * 1024 : 10 * 1024;
+	if ((size_t)file_info.st_size < minimum_size) {
+		RK_LOGW("small file, do not upload");
+		rawFarmeRecType = FILE_NULL;
+		return -3;
 	}
-	
+	if (!file_name || !file_path ||
+	    strlen(rawFarmeRecFileName) >= file_name_size ||
+	    strlen(rawFarmeRecPath) >= file_path_size) {
+		rawFarmeRecType = FILE_NULL;
+		return -4;
+	}
+	strcpy(file_name, rawFarmeRecFileName);
+	strcpy(file_path, rawFarmeRecPath);
+	rawFarmeRecType = FILE_NULL;
 	return 0;
+}
+
+void discard_file_rec(void)
+{
+	if (save_file) {
+		fclose(save_file);
+		save_file = NULL;
+		unlink(rawFarmeRecPath);
+	}
+	rawFarmeRecType = FILE_NULL;
 }
 
 RK_S32 take_photo(void) {
@@ -243,7 +279,8 @@ RK_S32 take_photo(void) {
 	VENC_RECV_PIC_PARAM_S stRecvParam;
 	memset(&stRecvParam, 0, sizeof(VENC_RECV_PIC_PARAM_S));
 	stRecvParam.s32RecvPicNum = 1;
-	RK_MPI_VENC_StartRecvFrame(JPEG_VENC_CHN, &stRecvParam);
+	if (RK_MPI_VENC_StartRecvFrame(JPEG_VENC_CHN, &stRecvParam) != RK_SUCCESS)
+		return -1;
 	take_photo_one = 1;
 
 	return 0;

@@ -26,17 +26,232 @@ static RK_U64 voice_received_bytes = 0;
 static RK_U64 voice_played_bytes = 0;
 static RK_U64 voice_total_bytes = 0;
 static time_t voice_end_at = 0;
+static pthread_mutex_t control_lock = PTHREAD_MUTEX_INITIALIZER;
+static char control_outbox[8][512];
+static unsigned int control_head = 0;
+static unsigned int control_count = 0;
+static bool platform_recording = false;
+static char platform_photo_cmd_id[96] = {0};
 
 #define HELLO_ACK_TIMEOUT_SECONDS 5
 #define UPLOAD_ACK_TIMEOUT_SECONDS 5
 #define VOICE_END_TIMEOUT_SECONDS 5
 #define DEVICE_PROTOCOL_VERSION "1.0"
-#define DEVICE_APP_VERSION "1.0.0"
+#define DEVICE_APP_VERSION "1.1.0"
 
 #define LWSC_RECONNECT_SECONDS 10
 
 int init_lws_create(void);
 int lwsc_reconnect(void);
+
+struct platform_upload_job {
+    char file_name[128];
+    char file_path[256];
+    char cmd_id[96];
+};
+
+static bool queue_control_json(cJSON *json)
+{
+    char *payload = cJSON_PrintUnformatted(json);
+    if (!payload) return false;
+    bool queued = false;
+    pthread_mutex_lock(&control_lock);
+    if (strlen(payload) < sizeof(control_outbox[0]) &&
+        control_count < sizeof(control_outbox) / sizeof(control_outbox[0])) {
+        unsigned int tail = (control_head + control_count) %
+                            (sizeof(control_outbox) / sizeof(control_outbox[0]));
+        strcpy(control_outbox[tail], payload);
+        control_count++;
+        queued = true;
+    }
+    pthread_mutex_unlock(&control_lock);
+    if (!queued) RK_LOGE("control reply queue full or payload too long");
+    free(payload);
+    if (queued && context) lws_cancel_service(context);
+    return queued;
+}
+
+static void queue_command_ack(const char *id, const char *status, const char *error_code)
+{
+    cJSON *json = cJSON_CreateObject();
+    if (!json) return;
+    cJSON_AddStringToObject(json, "cmd", "command_ack");
+    cJSON_AddStringToObject(json, "cmd_id", id);
+    cJSON_AddStringToObject(json, "status", status);
+    if (error_code) cJSON_AddStringToObject(json, "error_code", error_code);
+    queue_control_json(json);
+    cJSON_Delete(json);
+}
+
+static void queue_command_result(const char *id, const char *request_cmd,
+                                 const char *status, const char *error_code,
+                                 cJSON *data)
+{
+    cJSON *json = cJSON_CreateObject();
+    if (!json) { cJSON_Delete(data); return; }
+    cJSON_AddStringToObject(json, "cmd", "command_result");
+    cJSON_AddStringToObject(json, "cmd_id", id);
+    cJSON_AddStringToObject(json, "request_cmd", request_cmd);
+    cJSON_AddStringToObject(json, "status", status);
+    if (error_code) cJSON_AddStringToObject(json, "error_code", error_code);
+    if (data) cJSON_AddItemToObject(json, "data", data);
+    queue_control_json(json);
+    cJSON_Delete(json);
+}
+
+bool lwsc_platform_recording(void)
+{
+    pthread_mutex_lock(&control_lock);
+    bool active = platform_recording;
+    pthread_mutex_unlock(&control_lock);
+    return active;
+}
+
+void lwsc_interrupt_platform_recording(void)
+{
+    pthread_mutex_lock(&control_lock);
+    bool active = platform_recording;
+    platform_recording = false;
+    pthread_mutex_unlock(&control_lock);
+    if (active) discard_file_rec();
+}
+
+void lwsc_interrupt_platform_photo(void)
+{
+    char id[sizeof(platform_photo_cmd_id)] = {0};
+    pthread_mutex_lock(&control_lock);
+    strcpy(id, platform_photo_cmd_id);
+    platform_photo_cmd_id[0] = '\0';
+    pthread_mutex_unlock(&control_lock);
+    if (id[0]) queue_command_result(id, "snap_jpeg", "failed", "EXECUTION_FAILED", NULL);
+}
+
+void lwsc_platform_photo_saved(bool success, const char *file_name,
+                               const char *file_path)
+{
+    char id[sizeof(platform_photo_cmd_id)] = {0};
+    pthread_mutex_lock(&control_lock);
+    strcpy(id, platform_photo_cmd_id);
+    platform_photo_cmd_id[0] = '\0';
+    pthread_mutex_unlock(&control_lock);
+    if (id[0]) queue_command_result(id, "snap_jpeg",
+                                    success ? "success" : "failed",
+                                    success ? NULL : "EXECUTION_FAILED", NULL);
+    if (success && file_name && file_path)
+        upload_lwsc_with_cmd_id("upload_jpeg", file_name, file_path,
+                                id[0] ? id : NULL);
+}
+
+static void *platform_upload_pcm_task(void *arg)
+{
+    struct platform_upload_job *job = (struct platform_upload_job *)arg;
+    upload_lwsc_with_cmd_id("upload_pcm", job->file_name,
+                            job->file_path, job->cmd_id);
+    free(job);
+    return NULL;
+}
+
+static void handle_platform_command(const char *cmd, cJSON *root)
+{
+    cJSON *id_json = cJSON_GetObjectItem(root, "cmd_id");
+    if (!cJSON_IsString(id_json) || !id_json->valuestring ||
+        !id_json->valuestring[0] || strlen(id_json->valuestring) >= 96) {
+        RK_LOGW("ignore control command without valid cmd_id");
+        return;
+    }
+    const char *id = id_json->valuestring;
+    if (!cmd[0]) {
+        queue_command_ack(id, "rejected", "INVALID_COMMAND");
+        return;
+    }
+    if (strcmp(cmd, "get_status") == 0) {
+        queue_command_ack(id, "accepted", NULL);
+        cJSON *data = cJSON_CreateObject();
+        if (!data) {
+            queue_command_result(id, cmd, "failed", "EXECUTION_FAILED", NULL);
+            return;
+        }
+        bool recording = save_file && rawFarmeRecType == FILE_AI_PCM;
+        cJSON_AddBoolToObject(data, "recording", recording);
+        cJSON_AddStringToObject(data, "recording_source", recording
+                                ? (lwsc_platform_recording() ? "platform" : "button") : "none");
+        pthread_mutex_lock(&voice_lock);
+        bool playing = voice_active || ao_playing;
+        pthread_mutex_unlock(&voice_lock);
+        cJSON_AddBoolToObject(data, "playing", playing);
+        struct timespec uptime = {0};
+        clock_gettime(CLOCK_MONOTONIC, &uptime);
+        cJSON_AddNumberToObject(data, "uptime_seconds", (double)uptime.tv_sec);
+        cJSON_AddStringToObject(data, "app_version", DEVICE_APP_VERSION);
+        queue_command_result(id, cmd, "success", NULL, data);
+        return;
+    }
+    if (strcmp(cmd, "snap_jpeg") == 0) {
+        if (save_file || take_photo_one) {
+            queue_command_ack(id, "rejected", "DEVICE_BUSY");
+            return;
+        }
+        pthread_mutex_lock(&control_lock);
+        strcpy(platform_photo_cmd_id, id);
+        pthread_mutex_unlock(&control_lock);
+        queue_command_ack(id, "accepted", NULL);
+        if (take_photo() != 0) lwsc_interrupt_platform_photo();
+        return;
+    }
+    if (strcmp(cmd, "start_pcm") == 0) {
+        pthread_mutex_lock(&voice_lock);
+        bool playing = voice_active || ao_playing;
+        pthread_mutex_unlock(&voice_lock);
+        if (save_file || take_photo_one || playing) {
+            queue_command_ack(id, "rejected", "DEVICE_BUSY");
+            return;
+        }
+        queue_command_ack(id, "accepted", NULL);
+        if (start_file_rec(FILE_AI_PCM) == 0) {
+            pthread_mutex_lock(&control_lock);
+            platform_recording = true;
+            pthread_mutex_unlock(&control_lock);
+            queue_command_result(id, cmd, "success", NULL, NULL);
+        } else {
+            queue_command_result(id, cmd, "failed", "EXECUTION_FAILED", NULL);
+        }
+        return;
+    }
+    if (strcmp(cmd, "stop_pcm") == 0) {
+        if (!lwsc_platform_recording()) {
+            queue_command_ack(id, "rejected", save_file ? "DEVICE_BUSY" : "NOT_RECORDING");
+            return;
+        }
+        queue_command_ack(id, "accepted", NULL);
+        pthread_mutex_lock(&control_lock);
+        platform_recording = false;
+        pthread_mutex_unlock(&control_lock);
+        struct platform_upload_job *job = (struct platform_upload_job *)calloc(1, sizeof(*job));
+        if (!job) {
+            discard_file_rec();
+            queue_command_result(id, cmd, "failed", "EXECUTION_FAILED", NULL);
+            return;
+        }
+        int result = stop_file_rec_local(job->file_name, sizeof(job->file_name),
+                                         job->file_path, sizeof(job->file_path));
+        if (result != 0) {
+            free(job);
+            queue_command_result(id, cmd, "failed", "EXECUTION_FAILED", NULL);
+            return;
+        }
+        strcpy(job->cmd_id, id);
+        pthread_t upload_thread;
+        if (pthread_create(&upload_thread, NULL, platform_upload_pcm_task, job) != 0) {
+            free(job);
+            queue_command_result(id, cmd, "failed", "EXECUTION_FAILED", NULL);
+            return;
+        }
+        pthread_detach(upload_thread);
+        queue_command_result(id, cmd, "success", NULL, NULL);
+        return;
+    }
+    queue_command_ack(id, "rejected", "UNSUPPORTED_COMMAND");
+}
 
 static void queue_voice_status_locked(const char *id, const char *status, const char *error_code)
 {
@@ -92,6 +307,22 @@ static int ws_callback_cmd(struct lws *wsi, enum lws_callback_reasons reason,
                 }
                 cJSON_Delete(hello);
                 cmd_hello_pending = false;
+                break;
+            }
+            char control_payload[sizeof(control_outbox[0])] = {0};
+            bool more_control = false;
+            pthread_mutex_lock(&control_lock);
+            if (hello_accepted && control_count) {
+                strcpy(control_payload, control_outbox[control_head]);
+                control_head = (control_head + 1) %
+                               (sizeof(control_outbox) / sizeof(control_outbox[0]));
+                control_count--;
+                more_control = control_count != 0;
+            }
+            pthread_mutex_unlock(&control_lock);
+            if (control_payload[0]) {
+                lws_send_message(wsi, control_payload);
+                if (more_control) lws_callback_on_writable(wsi);
                 break;
             }
             bool notice_sent = false;
@@ -263,28 +494,13 @@ static int ws_callback_cmd(struct lws *wsi, enum lws_callback_reasons reason,
                     break;
                 }
 
-                cJSON_Delete(pJsonRoot);  
+                handle_platform_command(cmd, pJsonRoot);
+                cJSON_Delete(pJsonRoot);
             }else{
                 RK_LOGE("cmd parse error\n");
                 break;
             }   
 
-            RK_LOGI("cmd:%s", cmd );
-            if ( 0 == strcmp( cmd, "start_pcm") ){
-                start_file_rec( FILE_AI_PCM );
-            }else if( 0 == strcmp( cmd, "stop_pcm") ){
-                stop_file_rec();
-            }else if( 0 == strcmp( cmd, "start_h264") ){
-                start_file_rec( FILE_VI_H264 );
-            }else if( 0 == strcmp( cmd, "stop_h264") ){
-                stop_file_rec();
-            }else if( 0 == strcmp( cmd, "snap_jpeg") ){
-                take_photo();
-            }else if( 0 == strcmp( cmd, "reboot") ){
-            
-            }else if( 0 == strcmp( cmd, "uptime") ){
-  
-            }
             break;
            }
 
@@ -292,6 +508,7 @@ static int ws_callback_cmd(struct lws *wsi, enum lws_callback_reasons reason,
             printf("cmd 连接失败\n");
             wsi_cmd = NULL;
             hello_accepted = false;
+            lwsc_interrupt_platform_recording();
             lwsc_reconnect();
             break;
 
@@ -300,6 +517,7 @@ static int ws_callback_cmd(struct lws *wsi, enum lws_callback_reasons reason,
             printf("cmd 连接断开\n");
             wsi_cmd = NULL;
             hello_accepted = false;
+            lwsc_interrupt_platform_recording();
             lwsc_reconnect();
             break;
 
@@ -436,6 +654,11 @@ void *lws_task(void *arg) {
             if (ack_timed_out) ao_play_snd(SND_UPLOAD_ACK_TIMEOUT);
             if (notice_ready && hello_accepted && wsi_cmd)
                 lws_callback_on_writable(wsi_cmd);
+            pthread_mutex_lock(&control_lock);
+            bool control_ready = control_count != 0;
+            pthread_mutex_unlock(&control_lock);
+            if (control_ready && hello_accepted && wsi_cmd)
+                lws_callback_on_writable(wsi_cmd);
             pthread_mutex_lock(&voice_lock);
             if (voice_active && voice_end_at &&
                 time(NULL) - voice_end_at >= VOICE_END_TIMEOUT_SECONDS &&
@@ -460,6 +683,11 @@ void *lws_task(void *arg) {
         hello_accepted = false;
         voice_connected = false;
         hello_sent_at = 0;
+        lwsc_interrupt_platform_recording();
+        pthread_mutex_lock(&control_lock);
+        platform_photo_cmd_id[0] = '\0';
+        control_head = control_count = 0;
+        pthread_mutex_unlock(&control_lock);
         pthread_mutex_lock(&notice_lock);
         pending_notice[0] = '\0';
         pending_upload_cmd[0] = '\0';
@@ -589,7 +817,8 @@ bool lwsc_is_ready(void)
            !lws_reconnect_requested;
 }
 
-int lwsc_send_upload_notice(const char *cmd, const char *file, RK_U64 msgid)
+int lwsc_send_upload_notice(const char *cmd, const char *file, RK_U64 msgid,
+                            const char *cmd_id)
 {
     if (!cmd || !file || !lwsc_is_ready()) return -1;
     cJSON *json = cJSON_CreateObject();
@@ -597,6 +826,7 @@ int lwsc_send_upload_notice(const char *cmd, const char *file, RK_U64 msgid)
     cJSON_AddNumberToObject(json, "msgid", (double)msgid);
     cJSON_AddStringToObject(json, "cmd", cmd);
     cJSON_AddStringToObject(json, "file", file);
+    if (cmd_id && cmd_id[0]) cJSON_AddStringToObject(json, "cmd_id", cmd_id);
     char *payload = cJSON_PrintUnformatted(json);
     cJSON_Delete(json);
     if (!payload) return -1;

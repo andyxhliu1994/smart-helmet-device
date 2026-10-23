@@ -172,14 +172,21 @@ void *VI_jpeg_task(void *arg) {
 				sprintf( rawFarmeRecFileName, "%s-%ld.jpeg", devSn, timestamp );
 				sprintf( rawFarmeRecPath, "%s/%s", recTmpFileDir, rawFarmeRecFileName );
 				save_file = fopen( rawFarmeRecPath, "wb");
-				if ( NULL == save_file) 
+				if ( NULL == save_file) {
 					RK_LOGE("ERROR: open file: %s fail, exit", rawFarmeRecPath);
+					lwsc_platform_photo_saved(false, NULL, NULL);
+				}
 				else{
-					fwrite(data, 1, stFrame.pstPack->u32Len, save_file );
+					size_t written = fwrite(data, 1, stFrame.pstPack->u32Len, save_file );
 					fflush(save_file);
-					fclose(save_file);				
+					fclose(save_file);
 					save_file = NULL;
-					upload_lwsc( "upload_jpeg",  rawFarmeRecFileName, rawFarmeRecPath );
+					if (written != stFrame.pstPack->u32Len) {
+						lwsc_platform_photo_saved(false, NULL, NULL);
+						unlink(rawFarmeRecPath);
+					} else {
+						lwsc_platform_photo_saved(true, rawFarmeRecFileName, rawFarmeRecPath);
+					}
 				}
 			}else
 				RK_LOGE("rec file is busying\n");
@@ -190,8 +197,13 @@ void *VI_jpeg_task(void *arg) {
 			if (ret != RK_SUCCESS) 
 				RK_LOGE("RK_MPI_VENC_ReleaseStream fail %x\n", ret);
 
-		} else 
+		} else {
 			RK_LOGE("RK_MPI_VENC_GetStream timeout %x\n", ret);
+			if (take_photo_one) {
+				take_photo_one = 0;
+				lwsc_platform_photo_saved(false, NULL, NULL);
+			}
+		}
 	}
 	if (stFrame.pstPack)
 		free(stFrame.pstPack);
@@ -466,5 +478,3 @@ RK_S32 deinit_vi()
 	printf("%s vi deinit finish\n", __func__);
     return 0;
 }
-
-

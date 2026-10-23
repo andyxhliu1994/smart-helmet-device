@@ -311,9 +311,19 @@ RK_S32 deinit_rtsp();
 /**************************************************************************** */
 extern bool take_photo_one;
 RK_S32 upload_lwsc( char* cmd_str, char* file_name, char* file_path );
+RK_S32 upload_lwsc_with_cmd_id(const char *cmd, const char *file_name,
+                               const char *file_path, const char *cmd_id);
 RK_S32 start_file_rec( enum rec_file_t rec_file_type);
 RK_S32 stop_file_rec( void );
+RK_S32 stop_file_rec_local(char *file_name, size_t file_name_size,
+                           char *file_path, size_t file_path_size);
+void discard_file_rec(void);
 RK_S32 take_photo(void);
+void lwsc_platform_photo_saved(bool success, const char *file_name,
+                               const char *file_path);
+bool lwsc_platform_recording(void);
+void lwsc_interrupt_platform_recording(void);
+void lwsc_interrupt_platform_photo(void);
 
 /**************************************************************************** */
 
@@ -422,7 +432,8 @@ extern struct lws *wsi_voice ;
 int init_lwsc(void);
 void deinit_lwsc(void);
 bool lwsc_is_ready(void);
-int lwsc_send_upload_notice(const char *cmd, const char *file, RK_U64 msgid);
+int lwsc_send_upload_notice(const char *cmd, const char *file, RK_U64 msgid,
+                            const char *cmd_id);
 bool lwsc_voice_was_cancelled(void);
 void lwsc_voice_playback_progress(int bytes, bool failed);
 void lws_send_message(struct lws *wsi, const char *message);
