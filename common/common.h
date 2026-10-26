@@ -380,7 +380,9 @@ typedef struct {
     int size;                     // 当前缓冲区中的元素个数
 } CircularBuffer;
 extern CircularBuffer ao_play_cb;
+extern CircularBuffer ao_voice_cb;
 extern bool ao_playing ;
+extern bool ao_playing_voice;
 extern bool protocol_only_mode;
 
 enum snd_id{
@@ -409,6 +411,8 @@ enum snd_id{
 RK_S32 ao_set_other(RK_S32 s32SetVolume);
 void *ao_play_task(void *arg);
 int ao_play_snd( enum snd_id snd );
+bool lwsc_voice_is_active(void);
+void lwsc_voice_start_if_ready(void);
 
 // 初始化缓冲区
 void init_buffer(CircularBuffer* cb) ;

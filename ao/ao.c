@@ -262,7 +262,9 @@ RK_S32 deinit_ao()
 
 
 CircularBuffer ao_play_cb;
+CircularBuffer ao_voice_cb;
 bool ao_playing = false;
+bool ao_playing_voice = false;
 
 void *ao_play_task(void *arg) {
     bool voice_task = arg != NULL;
@@ -271,18 +273,22 @@ void *ao_play_task(void *arg) {
     RK_U64 timeStamp = 0;
     AUDIO_FRAME_S frame;
 	RK_S32 s32MilliSec = -1;
-	RK_U64 i = 0;
+    RK_U64 i = 0;
+    CircularBuffer *buffer = voice_task ? &ao_voice_cb : &ao_play_cb;
 
     while( !quit ){
-		ao_playing = true ;
 		if (voice_task && lwsc_voice_was_cancelled()) break;
+		if (!voice_task && lwsc_voice_is_active()) break;
+		if (voice_task && !lwsc_voice_is_active() &&
+		    buffered_audio_bytes(buffer) == 0) break;
 
 		if( i > 30 ){
 			printf("ao play task no data timeout\n");
 			break;
 		}
-        RK_S32 ret = read_from_buffer(&ao_play_cb, read_data, FIXED_READ_LENGTH );
+        RK_S32 ret = read_from_buffer(buffer, read_data, FIXED_READ_LENGTH );
         if( ret == -1 ){
+			if (!voice_task) break;
 			i++;
             memset(read_data, 0, FIXED_READ_LENGTH );
         }else{
@@ -315,6 +321,8 @@ void *ao_play_task(void *arg) {
         usleep(1000 * 20);
     }
 	ao_playing = false;
+	ao_playing_voice = false;
+    if (!voice_task) lwsc_voice_start_if_ready();
     printf("ao pcm play task end\n");
  
     return NULL;
@@ -322,6 +330,7 @@ void *ao_play_task(void *arg) {
 
 int ao_play_snd( enum snd_id snd )
 {
+	if (lwsc_voice_is_active()) return -1;
 	char conf_file_path[128] = {0};
 	const char* file_name = NULL;
 	switch( (int)snd ){
@@ -351,22 +360,34 @@ int ao_play_snd( enum snd_id snd )
    	 	RK_LOGE( "conf Failed to open %s", conf_file_path);
     	return -1;
 	}
+	/* 本地提示只保留最新一条，避免多次按键/网络提示排成长队。 */
+	if (ao_playing && !ao_playing_voice) init_buffer(&ao_play_cb);
 	#define BUFFER_SIZE 1024
     char buf[BUFFER_SIZE] = {0};
     int bytes_read = 0;
     while ((bytes_read = fread(buf, 1, BUFFER_SIZE, f)) > 0) {
-        write_to_buffer( &ao_play_cb, (uint8_t*)buf, bytes_read ); 
+		if (lwsc_voice_is_active() ||
+		    write_to_buffer(&ao_play_cb, (uint8_t*)buf, bytes_read) != 0) {
+			fclose(f);
+			return -2;
+		}
     }
     // 3. 检查循环结束的原因
     if (ferror(f)) {
         RK_LOGE("read snd file %s, error", conf_file_path );
+		fclose(f);
 		return -2;
     }
 	fclose(f);
+	if (lwsc_voice_is_active()) {
+		init_buffer(&ao_play_cb);
+		return -1;
+	}
 
 	if( false == ao_playing ){
 		pthread_t ao_thread;
 		ao_playing = true;
+		ao_playing_voice = false;
 		if (pthread_create(&ao_thread, NULL, ao_play_task, NULL) == 0)
 			pthread_detach(ao_thread);
 		else ao_playing = false;
