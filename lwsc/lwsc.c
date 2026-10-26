@@ -39,7 +39,7 @@ static char platform_photo_cmd_id[96] = {0};
 #define UPLOAD_ACK_TIMEOUT_SECONDS 5
 #define VOICE_END_TIMEOUT_SECONDS 5
 #define DEVICE_PROTOCOL_VERSION "1.0"
-#define DEVICE_APP_VERSION "1.1.1"
+#define DEVICE_APP_VERSION "1.1.2"
 
 #define LWSC_RECONNECT_SECONDS 10
 
@@ -753,6 +753,8 @@ int init_lws_create(void)
     info.ka_time = 30;
     info.ka_probes = 5;
     info.ka_interval = 10;
+    info.timeout_secs = CONNECTION_TIMEOUT_SECONDS;
+    info.connect_timeout_secs = CONNECTION_TIMEOUT_SECONDS;
     info.retry_and_idle_policy = &retry; // 绑定重试和闲置策略
     context = lws_create_context(&info);
     if( !context ){
